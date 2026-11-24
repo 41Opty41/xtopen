@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test & build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build pytest
+          python -m pip install -e .
+
+      - name: Run test suite
+        run: pytest -v
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Stage FreeCAD macro
+        run: cp freecad/ImportParasolid.FCMacro dist/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xtopen"
+version = "0.2.0"
+description = "Clean-room Parasolid XT (.x_b, .x_t, .x_p, .x_d) reader, inspector, and native STEP AP214/AP242 converter"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["cad", "parasolid", "xt", "xb", "step", "brep", "nurbs", "freecad"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = []
+
+[project.optional-dependencies]
+occt = ["cadquery-ocp>=7.7"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+xtopen = "xtopen.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/41Opty41/xtopen"
+Repository = "https://github.com/41Opty41/xtopen"
+Issues = "https://github.com/41Opty41/xtopen/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

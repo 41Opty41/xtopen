@@ -1,0 +1,57 @@
+# -*- coding: utf-8 -*-
+"""FreeCAD Macro: Import Parasolid (.x_b / .x_t) via xtopen -> STEP."""
+
+import os
+import tempfile
+
+try:
+    from PySide6 import QtWidgets as _QtDlgMod
+except ImportError:
+    try:
+        from PySide2 import QtWidgets as _QtDlgMod
+    except ImportError:
+        from PySide import QtGui as _QtDlgMod
+
+import FreeCAD
+import Import
+
+try:
+    import xtopen
+except ImportError as exc:
+    raise ImportError(
+        "xtopen package not found in FreeCAD's Python environment. "
+        "Install it with: FreeCAD_python -m pip install xtopen"
+    ) from exc
+
+
+def main():
+    path, _ = _QtDlgMod.QFileDialog.getOpenFileName(
+        None,
+        "Import Parasolid XT",
+        "",
+        "Parasolid Files (*.x_b *.x_t *.x_p);;All Files (*)",
+    )
+    if not path:
+        return
+
+    low = path.lower()
+    if low.endswith(".x_t"):
+        parsed = xtopen.load_xt(path)
+    else:
+        parsed = xtopen.load_xb(path)
+
+    fd, step_path = tempfile.mkstemp(suffix=".step")
+    os.close(fd)
+    try:
+        xtopen.export_step(parsed, step_path, units="mm")
+        doc = FreeCAD.ActiveDocument or FreeCAD.newDocument(
+            os.path.splitext(os.path.basename(path))[0]
+        )
+        Import.insert(step_path, doc.Name)
+        doc.recompute()
+    finally:
+        if os.path.exists(step_path):
+            os.remove(step_path)
+
+
+main()
