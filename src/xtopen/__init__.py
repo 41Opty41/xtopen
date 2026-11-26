@@ -21,13 +21,15 @@ from .model import (
     Loop,
     Face,
     Attribute,
+    Appearance,
+    AssemblyInfo,
     BrepModel,
     extract_brep,
 )
 from .inspect import ValidationReport, validate, summarize, to_json
 from .step_writer import export_step, dumps_step
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "__version__",
@@ -55,6 +57,8 @@ __all__ = [
     "Loop",
     "Face",
     "Attribute",
+    "Appearance",
+    "AssemblyInfo",
     "BrepModel",
     "extract_brep",
     "ValidationReport",

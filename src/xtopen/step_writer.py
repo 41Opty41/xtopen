@@ -7,7 +7,18 @@ import math
 from pathlib import Path
 from typing import Any
 
-from .model import BrepModel, Coedge, Edge, Face, Loop, NurbsCurve, NurbsSurface, extract_brep
+from .model import (
+    Appearance,
+    AssemblyInfo,
+    BrepModel,
+    Coedge,
+    Edge,
+    Face,
+    Loop,
+    NurbsCurve,
+    NurbsSurface,
+    extract_brep,
+)
 from .xb import ParseResult
 
 
@@ -317,6 +328,167 @@ def _interpolate_cubic_bspline(pts: list[tuple[float, float, float]]) -> NurbsCu
     return NurbsCurve(degree=3, poles=poles, knots=uniq_knots, multiplicities=mults)
 
 
+def _tf_is_identity(tf: dict[str, Any] | None) -> bool:
+    if not tf:
+        return True
+    rot = tf.get("rotation_matrix") or [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    t = tf.get("translation") or (0.0, 0.0, 0.0)
+    sc = float(tf.get("scale", 1.0))
+    if len(rot) < 9:
+        rot = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    id9 = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    return (
+        all(abs(float(rot[i]) - id9[i]) < 1e-12 for i in range(9))
+        and all(abs(float(t[i])) < 1e-12 for i in range(3))
+        and abs(sc - 1.0) < 1e-12
+    )
+
+
+def _tf_det(tf: dict[str, Any]) -> float:
+    r = tf.get("rotation_matrix") or [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    if len(r) < 9:
+        return 1.0
+    return (
+        r[0] * (r[4] * r[8] - r[5] * r[7])
+        - r[1] * (r[3] * r[8] - r[5] * r[6])
+        + r[2] * (r[3] * r[7] - r[4] * r[6])
+    )
+
+
+def _tf_is_rigid(tf: dict[str, Any] | None) -> bool:
+    if not tf:
+        return True
+    sc = float(tf.get("scale", 1.0))
+    return abs(sc - 1.0) < 1e-9 and _tf_det(tf) > 0.0
+
+
+def _tf_apply_pt(tf: dict[str, Any], p: tuple[float, float, float]) -> tuple[float, float, float]:
+    r = tf.get("rotation_matrix") or [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    if len(r) < 9:
+        r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    t = tf.get("translation") or (0.0, 0.0, 0.0)
+    sc = float(tf.get("scale", 1.0))
+    return (
+        sc * (r[0] * p[0] + r[1] * p[1] + r[2] * p[2]) + t[0],
+        sc * (r[3] * p[0] + r[4] * p[1] + r[5] * p[2]) + t[1],
+        sc * (r[6] * p[0] + r[7] * p[1] + r[8] * p[2]) + t[2],
+    )
+
+
+def _tf_apply_dir(tf: dict[str, Any], d: tuple[float, float, float]) -> tuple[float, float, float]:
+    r = tf.get("rotation_matrix") or [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    if len(r) < 9:
+        return d
+    return (
+        r[0] * d[0] + r[1] * d[1] + r[2] * d[2],
+        r[3] * d[0] + r[4] * d[1] + r[5] * d[2],
+        r[6] * d[0] + r[7] * d[1] + r[8] * d[2],
+    )
+
+
+def _transform_surface_dict(surf: dict[str, Any], tf: dict[str, Any]) -> dict[str, Any]:
+    out = dict(surf)
+    sc = abs(float(tf.get("scale", 1.0)))
+    st = surf.get("type", "unknown")
+    if st == "plane":
+        out["origin"] = _tf_apply_pt(tf, surf["origin"])
+        out["normal"] = _tf_apply_dir(tf, surf["normal"])
+        out["x_axis"] = _tf_apply_dir(tf, surf["x_axis"])
+    elif st in ("cylinder", "cone"):
+        out["origin"] = _tf_apply_pt(tf, surf["origin"])
+        out["axis"] = _tf_apply_dir(tf, surf["axis"])
+        out["x_axis"] = _tf_apply_dir(tf, surf["x_axis"])
+        out["radius"] = float(surf["radius"]) * sc
+    elif st == "sphere":
+        out["centre"] = _tf_apply_pt(tf, surf["centre"])
+        out["axis"] = _tf_apply_dir(tf, surf["axis"])
+        out["x_axis"] = _tf_apply_dir(tf, surf["x_axis"])
+        out["radius"] = float(surf["radius"]) * sc
+    elif st == "torus":
+        out["centre"] = _tf_apply_pt(tf, surf["centre"])
+        out["axis"] = _tf_apply_dir(tf, surf["axis"])
+        out["x_axis"] = _tf_apply_dir(tf, surf["x_axis"])
+        out["major_radius"] = float(surf["major_radius"]) * sc
+        out["minor_radius"] = float(surf["minor_radius"]) * sc
+    elif st == "nurbs" and isinstance(surf.get("nurbs"), NurbsSurface):
+        ns = surf["nurbs"]
+        out["nurbs"] = NurbsSurface(
+            u_degree=ns.u_degree,
+            v_degree=ns.v_degree,
+            u_knots=ns.u_knots,
+            u_mults=ns.u_mults,
+            v_knots=ns.v_knots,
+            v_mults=ns.v_mults,
+            poles=[[_tf_apply_pt(tf, p) for p in row] for row in ns.poles],
+            weights=ns.weights,
+            u_periodic=ns.u_periodic,
+            v_periodic=ns.v_periodic,
+            u_closed=ns.u_closed,
+            v_closed=ns.v_closed,
+            rational=ns.rational,
+        )
+    elif st == "swept":
+        out["direction"] = _tf_apply_dir(tf, surf["direction"])
+        if isinstance(surf.get("profile"), dict):
+            out["profile"] = _transform_curve_dict(surf["profile"], tf)
+    elif st == "spun":
+        out["base"] = _tf_apply_pt(tf, surf["base"])
+        out["axis"] = _tf_apply_dir(tf, surf["axis"])
+        out["x_axis"] = _tf_apply_dir(tf, surf["x_axis"])
+        if isinstance(surf.get("profile"), dict):
+            out["profile"] = _transform_curve_dict(surf["profile"], tf)
+    elif st == "offset":
+        out["offset"] = float(surf["offset"]) * sc
+        if isinstance(surf.get("base_surface"), dict):
+            out["base_surface"] = _transform_surface_dict(surf["base_surface"], tf)
+    return out
+
+
+def _transform_curve_dict(curve: dict[str, Any], tf: dict[str, Any]) -> dict[str, Any]:
+    out = dict(curve)
+    sc = abs(float(tf.get("scale", 1.0)))
+    flip = _tf_det(tf) < 0.0
+    ct = curve.get("type", "unknown")
+    if ct == "line":
+        out["origin"] = _tf_apply_pt(tf, curve["origin"])
+        out["dir"] = _tf_apply_dir(tf, curve["dir"])
+    elif ct == "circle":
+        n = _tf_apply_dir(tf, curve["normal"])
+        out["centre"] = _tf_apply_pt(tf, curve["centre"])
+        out["normal"] = (-n[0], -n[1], -n[2]) if flip else n
+        out["x_axis"] = _tf_apply_dir(tf, curve["x_axis"])
+        out["radius"] = float(curve["radius"]) * sc
+    elif ct == "ellipse":
+        n = _tf_apply_dir(tf, curve["normal"])
+        out["centre"] = _tf_apply_pt(tf, curve["centre"])
+        out["normal"] = (-n[0], -n[1], -n[2]) if flip else n
+        out["x_axis"] = _tf_apply_dir(tf, curve["x_axis"])
+        out["major_radius"] = float(curve["major_radius"]) * sc
+        out["minor_radius"] = float(curve["minor_radius"]) * sc
+    elif ct == "nurbs" and isinstance(curve.get("nurbs"), NurbsCurve):
+        nc = curve["nurbs"]
+        if not nc.is_pcurve:
+            out["nurbs"] = NurbsCurve(
+                degree=nc.degree,
+                poles=[_tf_apply_pt(tf, p) for p in nc.poles],
+                knots=nc.knots,
+                multiplicities=nc.multiplicities,
+                weights=nc.weights,
+                periodic=nc.periodic,
+                closed=nc.closed,
+                rational=nc.rational,
+                vertex_dim=nc.vertex_dim,
+                is_pcurve=nc.is_pcurve,
+                poles_2d=nc.poles_2d,
+                host_surface_index=nc.host_surface_index,
+            )
+    elif ct == "intersection":
+        out["points"] = [_tf_apply_pt(tf, p) for p in (curve.get("points") or ())]
+    if isinstance(curve.get("sp_surface"), dict):
+        out["sp_surface"] = _transform_surface_dict(curve["sp_surface"], tf)
+    return out
+
+
 class _StepBuilder:
     """Stateful ISO-10303-21 entity emitter."""
 
@@ -328,9 +500,49 @@ class _StepBuilder:
         self._entities: list[str] = []
         self._pt_cache: dict[tuple[float, float, float], int] = {}
         self._dir_cache: dict[tuple[float, float, float], int] = {}
+        self._style_cache: dict[tuple[int, int, int, int], int] = {}
         self._vert_cache: dict[int, int] = {}
         self._surf_cache: dict[int, tuple[int, bool]] = {}
         self._edge_cache: dict[int, tuple[int, int, int, bool]] = {}
+
+    def reset_geom_caches(self) -> None:
+        self._vert_cache.clear()
+        self._surf_cache.clear()
+        self._edge_cache.clear()
+
+    def style_assignment(self, app: Appearance | None) -> int | None:
+        if app is None or app.color_rgb is None:
+            return None
+        r, g, b = (max(0.0, min(1.0, float(c))) for c in app.color_rgb)
+        t = float(app.transparency) if (app.transparency is not None and app.transparency > 1e-6) else 0.0
+        t = max(0.0, min(1.0, t))
+        key = (round(r * 1e6), round(g * 1e6), round(b * 1e6), round(t * 1e6))
+        if key in self._style_cache:
+            return self._style_cache[key]
+        cid = self.emit(f"COLOUR_RGB('',{_step_real(r)},{_step_real(g)},{_step_real(b)})")
+        fasc = self.emit(f"FILL_AREA_STYLE_COLOUR('',#{cid})")
+        fas = self.emit(f"FILL_AREA_STYLE('',(#{fasc}))")
+        ssfa = self.emit(f"SURFACE_STYLE_FILL_AREA(#{fas})")
+        if t > 1e-6:
+            sst = self.emit(f"SURFACE_STYLE_TRANSPARENT({_step_real(t)})")
+            ssr = self.emit(f"SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.CONSTANT_SHADING.,#{cid},(#{sst}))")
+            sss = self.emit(f"SURFACE_SIDE_STYLE('',(#{ssfa},#{ssr}))")
+        else:
+            sss = self.emit(f"SURFACE_SIDE_STYLE('',(#{ssfa}))")
+        ssu = self.emit(f"SURFACE_STYLE_USAGE(.BOTH.,#{sss})")
+        psa = self.emit(f"PRESENTATION_STYLE_ASSIGNMENT((#{ssu}))")
+        self._style_cache[key] = psa
+        return psa
+
+    def emit_styled_item(self, target_id: int, app: Appearance | None, styled_ids: list[int]) -> None:
+        psa = self.style_assignment(app)
+        if psa is not None:
+            styled_ids.append(self.emit(f"STYLED_ITEM('',(#{psa}),#{target_id})"))
+
+    def emit_presentation_if_any(self, styled_ids: list[int], geom_ctx: int) -> None:
+        if styled_ids:
+            items_str = ",".join(f"#{i}" for i in styled_ids)
+            self.emit(f"MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',({items_str}),#{geom_ctx})")
 
     def emit(self, body: str) -> int:
         eid = len(self._entities) + 1
@@ -568,38 +780,40 @@ class _StepBuilder:
         edge: Edge,
         first_coedge: Coedge,
         model: BrepModel,
+        tf: dict[str, Any] | None = None,
     ) -> tuple[int, int, int, bool]:
         """Emit EDGE_CURVE and return (edge_curve_id, v_start_id, v_end_id, edge_curve_same_sense)."""
         if edge.index in self._edge_cache:
             return self._edge_cache[edge.index]
 
-        cid, fallback_pt = self.emit_curve_geom(edge.curve)
+        curve_dict = _transform_curve_dict(edge.curve, tf) if tf is not None else edge.curve
+        cid, fallback_pt = self.emit_curve_geom(curve_dict)
 
-        # Canonical edge endpoints follow forward ('+') coedge sense
         sv_idx = first_coedge.start_vertex
         ev_idx = first_coedge.end_vertex
         if first_coedge.sense != "+":
             sv_idx, ev_idx = ev_idx, sv_idx
 
+        def _xpt(p: tuple[float, float, float]) -> tuple[float, float, float]:
+            return _tf_apply_pt(tf, p) if tf is not None else p
+
         if sv_idx is not None and sv_idx in model.vertices:
-            v1_id = self.emit_vertex(sv_idx, model.vertices[sv_idx].point)
+            v1_id = self.emit_vertex(sv_idx, _xpt(model.vertices[sv_idx].point))
         else:
             p_seam = self.point(fallback_pt or (0.0, 0.0, 0.0))
             v1_id = self.emit(f"VERTEX_POINT('',#{p_seam})")
 
         if ev_idx is not None and ev_idx in model.vertices:
-            v2_id = self.emit_vertex(ev_idx, model.vertices[ev_idx].point)
+            v2_id = self.emit_vertex(ev_idx, _xpt(model.vertices[ev_idx].point))
         else:
             v2_id = v1_id
 
-        # If edge's underlying curve sense is '-', curve geometry runs opposite edge canonical direction.
-        # For interpolated intersection curves, orient same_sense by comparing sampled endpoints to v1/v2.
         edge_same_sense = edge.sense == "+"
         if edge.curve_type == "intersection" and sv_idx in model.vertices and ev_idx in model.vertices and sv_idx != ev_idx:
-            pts = edge.curve.get("points") or []
+            pts = curve_dict.get("points") or []
             if len(pts) >= 2:
-                p_start = model.vertices[sv_idx].point
-                p_end = model.vertices[ev_idx].point
+                p_start = _xpt(model.vertices[sv_idx].point)
+                p_end = _xpt(model.vertices[ev_idx].point)
                 d_fwd = sum((pts[0][k] - p_start[k]) ** 2 for k in range(3)) + sum((pts[-1][k] - p_end[k]) ** 2 for k in range(3))
                 d_rev = sum((pts[-1][k] - p_start[k]) ** 2 for k in range(3)) + sum((pts[0][k] - p_end[k]) ** 2 for k in range(3))
                 edge_same_sense = d_fwd <= d_rev
@@ -608,72 +822,39 @@ class _StepBuilder:
         self._edge_cache[edge.index] = res
         return res
 
-    def build(self, model: BrepModel) -> str:
-        # Emit product / representation context header entities
-        app_ctx = self.emit(
-            "APPLICATION_CONTEXT('core data for automotive mechanical design processes')"
-            if self.schema == "AP214"
-            else "APPLICATION_CONTEXT('managed model based 3d engineering')"
-        )
-        self.emit(
-            f"APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#{app_ctx})"
-            if self.schema == "AP214"
-            else f"APPLICATION_PROTOCOL_DEFINITION('international standard','ap242_managed_model_based_3d_engineering',2014,#{app_ctx})"
-        )
-        prod_ctx = self.emit(f"PRODUCT_CONTEXT('',# {app_ctx},'mechanical')".replace("# ", "#"))
-        prod = self.emit(
-            f"PRODUCT({_step_str(self.name)},{_step_str(self.name)},'',(#{prod_ctx}))"
-        )
+    def emit_body_product(
+        self,
+        prod_name: str,
+        shells: list[tuple[int | None, list[Face], int, Appearance | None]],
+        model: BrepModel,
+        first_coedge_for_edge: dict[int, Coedge],
+        *,
+        tf: dict[str, Any] | None = None,
+        override_app: Appearance | None = None,
+        prod_ctx: int,
+        pdc: int,
+        geom_ctx: int,
+        root_ax: int,
+    ) -> tuple[int, int]:
+        self.reset_geom_caches()
+        sn = _step_str(prod_name)
+        prod = self.emit(f"PRODUCT({sn},{sn},'',(#{prod_ctx}))")
         pdf = self.emit(f"PRODUCT_DEFINITION_FORMATION('','',#{prod})")
-        pdc = self.emit(f"PRODUCT_DEFINITION_CONTEXT('part definition',#{app_ctx},'design')")
         pd = self.emit(f"PRODUCT_DEFINITION('design','',#{pdf},#{pdc})")
         pds = self.emit(f"PRODUCT_DEFINITION_SHAPE('','',#{pd})")
 
-        # Context + units
-        if self.units == "mm":
-            len_u = self.emit("(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))")
-        else:
-            len_u = self.emit("(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT($,.METRE.))")
-        ang_u = self.emit(
-            "(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.))"
-        )
-        sol_u = self.emit(
-            "(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT())"
-        )
-        unc = self.emit(f"UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-6),#{len_u},'distance_accuracy_value','confusion accuracy')")
-        geom_ctx = self.emit(
-            f"(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{unc})) "
-            f"GLOBAL_UNIT_ASSIGNED_CONTEXT((#{len_u},#{ang_u},#{sol_u})) REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY'))"
-        )
-
-        root_ax = self.axis2((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
-
-        # Index edges first so each edge knows its canonical coedge orientation
-        first_coedge_for_edge: dict[int, Coedge] = {}
-        for f in model.faces.values():
-            for lp in f.loops:
-                for ce in lp.coedges:
-                    if ce.edge_index not in first_coedge_for_edge:
-                        first_coedge_for_edge[ce.edge_index] = ce
-
-        # Map each shell index to its owning body_type (default 1=solid)
-        shell_body_type: dict[int | None, int] = {}
-        for b in model.bodies:
-            bt = b.get("body_type")
-            for sh_i in b.get("shell_indices", []):
-                shell_body_type.setdefault(sh_i, int(bt) if bt is not None else 1)
-
-        shell_faces: dict[int | None, list[Face]] = {}
-        for f in model.faces.values():
-            shell_faces.setdefault(f.shell_index, []).append(f)
-
+        det_neg = tf is not None and _tf_det(tf) < 0.0
         solid_items: list[int] = []
         sheet_items: list[int] = []
-        for sh_idx, faces_in_shell in shell_faces.items():
+        styled_items: list[int] = []
+        num_shells = len(shells)
+
+        for _sh_idx, faces_in_shell, btype, body_app in shells:
             face_ids: list[int] = []
             edge_use_count: dict[int, int] = {}
             for f in faces_in_shell:
-                sid, surf_flip = self.emit_surface(f.surface_index, f.surface)
+                surf_dict = _transform_surface_dict(f.surface, tf) if tf is not None else f.surface
+                sid, surf_flip = self.emit_surface(f.surface_index, surf_dict)
                 outer_idx = _pick_outer_loop_index(f, model)
                 bound_ids: list[int] = []
                 for li, lp in enumerate(f.loops):
@@ -684,7 +865,7 @@ class _StepBuilder:
                             continue
                         edge_use_count[edge.index] = edge_use_count.get(edge.index, 0) + 1
                         ref_ce = first_coedge_for_edge[edge.index]
-                        ec_id, _, _, _ = self.emit_edge(edge, ref_ce, model)
+                        ec_id, _, _, _ = self.emit_edge(edge, ref_ce, model, tf=tf)
                         oe_id = self.emit(
                             f"ORIENTED_EDGE('',*,*,#{ec_id},{_step_bool(ce.sense == '+')})"
                         )
@@ -692,31 +873,38 @@ class _StepBuilder:
                     if not oe_ids:
                         continue
                     loop_id = self.emit("EDGE_LOOP('',(" + ",".join(f"#{i}" for i in oe_ids) + "))")
-                    btype = "FACE_OUTER_BOUND" if li == outer_idx else "FACE_BOUND"
-                    bound_ids.append(self.emit(f"{btype}('',#{loop_id},.T.)"))
+                    btype_str = "FACE_OUTER_BOUND" if li == outer_idx else "FACE_BOUND"
+                    bound_ids.append(self.emit(f"{btype_str}('',#{loop_id},.T.)"))
 
                 if not bound_ids:
                     continue
-                face_sense = (f.sense == "+")
+                face_sense = f.sense == "+"
                 if surf_flip:
+                    face_sense = not face_sense
+                if det_neg:
                     face_sense = not face_sense
                 af_id = self.emit(
                     f"ADVANCED_FACE('',({','.join(f'#{i}' for i in bound_ids)}),#{sid},{_step_bool(face_sense)})"
                 )
+                self.emit_styled_item(af_id, f.appearance, styled_items)
                 face_ids.append(af_id)
 
             if not face_ids:
                 continue
-            btype = shell_body_type.get(sh_idx, 1)
             is_closed = bool(face_ids) and all(c >= 2 for c in edge_use_count.values()) and btype != 2
             faces_str = ",".join(f"#{i}" for i in face_ids)
+            eff_app = body_app.inherit_from(override_app) if (body_app and override_app) else (body_app or override_app)
             if is_closed:
                 shell = self.emit(f"CLOSED_SHELL('',({faces_str}))")
-                item_name = f"{self.name}_{len(solid_items) + 1}" if len(shell_faces) > 1 else self.name
-                solid_items.append(self.emit(f"MANIFOLD_SOLID_BREP({_step_str(item_name)},#{shell})"))
+                item_name = f"{prod_name}_{len(solid_items) + 1}" if num_shells > 1 else prod_name
+                msb = self.emit(f"MANIFOLD_SOLID_BREP({_step_str(item_name)},#{shell})")
+                self.emit_styled_item(msb, eff_app, styled_items)
+                solid_items.append(msb)
             else:
                 shell = self.emit(f"OPEN_SHELL('',({faces_str}))")
-                sheet_items.append(self.emit(f"SHELL_BASED_SURFACE_MODEL('',(#{shell}))"))
+                sbsm = self.emit(f"SHELL_BASED_SURFACE_MODEL('',(#{shell}))")
+                self.emit_styled_item(sbsm, eff_app, styled_items)
+                sheet_items.append(sbsm)
 
         all_items = solid_items + sheet_items
         items_str = ",".join(f"#{i}" for i in all_items + [root_ax])
@@ -727,6 +915,258 @@ class _StepBuilder:
         else:
             rep = self.emit(f"SHAPE_REPRESENTATION('',({items_str}),#{geom_ctx})")
         self.emit(f"SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})")
+        self.emit_presentation_if_any(styled_items, geom_ctx)
+        return pd, rep
+
+    def _placed_axis(self, tf: dict[str, Any] | None, root_ax: int) -> int:
+        if not tf or _tf_is_identity(tf):
+            return root_ax
+        r = tf.get("rotation_matrix") or [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        if len(r) < 9:
+            r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        t = tf.get("translation") or (0.0, 0.0, 0.0)
+        x_col = (float(r[0]), float(r[3]), float(r[6]))
+        z_col = (float(r[2]), float(r[5]), float(r[8]))
+        return self.axis2((float(t[0]), float(t[1]), float(t[2])), z_col, x_col)
+
+    def _emit_assembly_node(
+        self,
+        asm: AssemblyInfo,
+        seq: int,
+        asm_map: dict[int, AssemblyInfo],
+        body_map: dict[int, dict[str, Any]],
+        inst_map: dict[int, dict[str, Any]],
+        body_shells_map: dict[int, list[tuple[int | None, list[Face], int, Appearance | None]]],
+        model: BrepModel,
+        first_coedge_for_edge: dict[int, Coedge],
+        *,
+        prod_ctx: int,
+        pdc: int,
+        geom_ctx: int,
+        root_ax: int,
+        asm_cache: dict[int, tuple[int, int]],
+        body_cache: dict[int, tuple[int, int]],
+        visiting: set[int],
+        occ_counter: list[int],
+    ) -> tuple[int, int] | None:
+        if asm.index in asm_cache:
+            return asm_cache[asm.index]
+        if asm.index in visiting:
+            return None
+        visiting.add(asm.index)
+
+        child_placements: list[tuple[tuple[int, int], int, str]] = []
+        for local_i, inst_idx in enumerate(asm.instance_indices):
+            inst = inst_map.get(inst_idx)
+            if inst is None:
+                continue
+            part_idx = inst.get("part")
+            if part_idx is None:
+                continue
+            tf = inst.get("transform")
+            occ_name = inst.get("name") or (
+                f"{body_map[part_idx].get('name')}:{local_i + 1}"
+                if part_idx in body_map and body_map[part_idx].get("name")
+                else f"Component_{local_i + 1}"
+            )
+            if part_idx in body_map:
+                shells = body_shells_map.get(part_idx) or []
+                if not shells:
+                    continue
+                if _tf_is_rigid(tf):
+                    if part_idx not in body_cache:
+                        bname = body_map[part_idx].get("name") or f"{self.name}_part_{part_idx}"
+                        body_cache[part_idx] = self.emit_body_product(
+                            bname,
+                            shells,
+                            model,
+                            first_coedge_for_edge,
+                            prod_ctx=prod_ctx,
+                            pdc=pdc,
+                            geom_ctx=geom_ctx,
+                            root_ax=root_ax,
+                        )
+                    child_placements.append((body_cache[part_idx], self._placed_axis(tf, root_ax), occ_name))
+                else:
+                    bname = f"{body_map[part_idx].get('name') or self.name}_inst_{inst_idx}"
+                    c = self.emit_body_product(
+                        bname,
+                        shells,
+                        model,
+                        first_coedge_for_edge,
+                        tf=tf,
+                        override_app=inst.get("appearance"),
+                        prod_ctx=prod_ctx,
+                        pdc=pdc,
+                        geom_ctx=geom_ctx,
+                        root_ax=root_ax,
+                    )
+                    child_placements.append((c, root_ax, occ_name))
+            elif part_idx in asm_map:
+                sub = self._emit_assembly_node(
+                    asm_map[part_idx],
+                    seq + len(child_placements) + 1,
+                    asm_map,
+                    body_map,
+                    inst_map,
+                    body_shells_map,
+                    model,
+                    first_coedge_for_edge,
+                    prod_ctx=prod_ctx,
+                    pdc=pdc,
+                    geom_ctx=geom_ctx,
+                    root_ax=root_ax,
+                    asm_cache=asm_cache,
+                    body_cache=body_cache,
+                    visiting=visiting,
+                    occ_counter=occ_counter,
+                )
+                if sub is not None:
+                    child_placements.append((sub, self._placed_axis(tf, root_ax), occ_name))
+
+        visiting.discard(asm.index)
+        if not child_placements:
+            return None
+
+        asm_name = asm.name or (self.name if seq == 0 else f"{self.name}_asm_{asm.index}")
+        sa = _step_str(asm_name)
+        prod = self.emit(f"PRODUCT({sa},{sa},'',(#{prod_ctx}))")
+        pdf = self.emit(f"PRODUCT_DEFINITION_FORMATION('','',#{prod})")
+        pd = self.emit(f"PRODUCT_DEFINITION('design','',#{pdf},#{pdc})")
+        pds = self.emit(f"PRODUCT_DEFINITION_SHAPE('','',#{pd})")
+        rep = self.emit(f"SHAPE_REPRESENTATION({sa},(#{root_ax}),#{geom_ctx})")
+        self.emit(f"SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})")
+
+        for (child_pd, child_rep), placed_ax, occ_name in child_placements:
+            occ_counter[0] += 1
+            idt = self.emit(f"ITEM_DEFINED_TRANSFORMATION('','',#{root_ax},#{placed_ax})")
+            nauo = self.emit(
+                f"NEXT_ASSEMBLY_USAGE_OCCURRENCE({_step_str(f'NAUO_{occ_counter[0]}')},{_step_str(occ_name)},'',#{pd},#{child_pd},$)"
+            )
+            nauo_pds = self.emit(f"PRODUCT_DEFINITION_SHAPE('','',#{nauo})")
+            rel = self.emit(
+                f"(REPRESENTATION_RELATIONSHIP('','',#{child_rep},#{rep}) "
+                f"REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{idt}) SHAPE_REPRESENTATION_RELATIONSHIP())"
+            )
+            self.emit(f"CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{rel},#{nauo_pds})")
+
+        asm_cache[asm.index] = (pd, rep)
+        return pd, rep
+
+    def build(self, model: BrepModel) -> str:
+        app_ctx = self.emit(
+            "APPLICATION_CONTEXT('core data for automotive mechanical design processes')"
+            if self.schema == "AP214"
+            else "APPLICATION_CONTEXT('managed model based 3d engineering')"
+        )
+        self.emit(
+            f"APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#{app_ctx})"
+            if self.schema == "AP214"
+            else f"APPLICATION_PROTOCOL_DEFINITION('international standard','ap242_managed_model_based_3d_engineering',2014,#{app_ctx})"
+        )
+        prod_ctx = self.emit(f"PRODUCT_CONTEXT('',#{app_ctx},'mechanical')")
+        pdc = self.emit(f"PRODUCT_DEFINITION_CONTEXT('part definition',#{app_ctx},'design')")
+
+        if self.units == "mm":
+            len_u = self.emit("(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))")
+        else:
+            len_u = self.emit("(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT($,.METRE.))")
+        ang_u = self.emit("(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.))")
+        sol_u = self.emit("(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT())")
+        unc = self.emit(
+            f"UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-6),#{len_u},'distance_accuracy_value','confusion accuracy')"
+        )
+        geom_ctx = self.emit(
+            f"(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{unc})) "
+            f"GLOBAL_UNIT_ASSIGNED_CONTEXT((#{len_u},#{ang_u},#{sol_u})) REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY'))"
+        )
+
+        root_ax = self.axis2((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+
+        first_coedge_for_edge: dict[int, Coedge] = {}
+        for f in model.faces.values():
+            for lp in f.loops:
+                for ce in lp.coedges:
+                    if ce.edge_index not in first_coedge_for_edge:
+                        first_coedge_for_edge[ce.edge_index] = ce
+
+        shell_faces: dict[int | None, list[Face]] = {}
+        for f in model.faces.values():
+            shell_faces.setdefault(f.shell_index, []).append(f)
+
+        emitted_assembly = False
+        if model.assemblies and model.instances:
+            asm_map = {a.index: a for a in model.assemblies}
+            body_map = {b["index"]: b for b in model.bodies}
+            inst_map = {i["index"]: i for i in model.instances}
+            referenced_asms = {i["part"] for i in model.instances if i.get("part") in asm_map}
+
+            body_shells_map: dict[int, list[tuple[int | None, list[Face], int, Appearance | None]]] = {}
+            for b in model.bodies:
+                bt = int(b["body_type"]) if b.get("body_type") is not None else 1
+                entries = [
+                    (sh_i, shell_faces[sh_i], bt, b.get("appearance"))
+                    for sh_i in b.get("shell_indices", [])
+                    if sh_i in shell_faces
+                ]
+                if entries:
+                    body_shells_map[b["index"]] = entries
+
+            asm_cache: dict[int, tuple[int, int]] = {}
+            body_cache: dict[int, tuple[int, int]] = {}
+            visiting: set[int] = set()
+            occ_counter = [0]
+
+            roots = [a for a in model.assemblies if a.index not in referenced_asms] or model.assemblies
+            for seq, asm in enumerate(roots):
+                if (
+                    self._emit_assembly_node(
+                        asm,
+                        seq,
+                        asm_map,
+                        body_map,
+                        inst_map,
+                        body_shells_map,
+                        model,
+                        first_coedge_for_edge,
+                        prod_ctx=prod_ctx,
+                        pdc=pdc,
+                        geom_ctx=geom_ctx,
+                        root_ax=root_ax,
+                        asm_cache=asm_cache,
+                        body_cache=body_cache,
+                        visiting=visiting,
+                        occ_counter=occ_counter,
+                    )
+                    is not None
+                ):
+                    emitted_assembly = True
+
+        if not emitted_assembly:
+            shell_meta: dict[int | None, tuple[int, Appearance | None]] = {}
+            for b in model.bodies:
+                bt = int(b["body_type"]) if b.get("body_type") is not None else 1
+                for sh_i in b.get("shell_indices", []):
+                    shell_meta.setdefault(sh_i, (bt, b.get("appearance")))
+            shells = [
+                (sh_idx, fs, *shell_meta.get(sh_idx, (1, None)))
+                for sh_idx, fs in shell_faces.items()
+            ]
+            top_name = (
+                model.bodies[0].get("name") or self.name
+                if len(model.bodies) == 1
+                else self.name
+            )
+            self.emit_body_product(
+                top_name,
+                shells,
+                model,
+                first_coedge_for_edge,
+                prod_ctx=prod_ctx,
+                pdc=pdc,
+                geom_ctx=geom_ctx,
+                root_ax=root_ax,
+            )
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         schema_str = (

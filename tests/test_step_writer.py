@@ -7,7 +7,9 @@ import math
 import pytest
 
 from tests.conftest import (
+    make_assembly_two_parts,
     make_box,
+    make_colored_box,
     make_cone_frustum,
     make_cylinder,
     make_ellipse_and_intersection_sheets,
@@ -122,3 +124,45 @@ def test_step_multibody_ellipse_and_intersection_occt(tmp_path) -> None:
     assert valid_e is True
     # Quarter ellipse (pi*2*1/4 = pi/2) + triangle (0.5), scaled to mm^2
     assert area_e == pytest.approx((math.pi / 2.0 + 0.5) * 1e6, rel=1e-3)
+
+
+def test_step_colors_names_and_assembly_occt(tmp_path) -> None:
+    pytest.importorskip("OCP")
+    from xtopen import extract_brep, parse_xb, write_xb
+
+    # Roundtrip colored box via binary XT
+    col_xb = write_xb(make_colored_box())
+    col_model = extract_brep(parse_xb(col_xb))
+    assert col_model.bodies[0]["name"] == "RedBlock"
+    assert col_model.bodies[0]["appearance"].color_rgb == pytest.approx((0.85, 0.15, 0.15))
+    colored_faces = [f for f in col_model.faces.values() if f.appearance.color_rgb is not None]
+    assert len(colored_faces) == 1
+    assert colored_faces[0].appearance.color_rgb == pytest.approx((0.1, 0.4, 0.9))
+
+    col_step = dumps_step(col_model, units="mm")
+    assert "COLOUR_RGB" in col_step
+    assert "STYLED_ITEM" in col_step
+    assert "RedBlock" in col_step
+    col_stp_path = tmp_path / "colored_box.step"
+    col_stp_path.write_text(col_step, encoding="ascii")
+    _, valid_c, vol_c, _ = _read_step_occt(col_stp_path)
+    assert valid_c is True
+    assert vol_c == pytest.approx(20.0 * 30.0 * 40.0, rel=1e-3)
+
+    # Roundtrip assembly with 2 instanced 10x10x10 mm boxes -> 2000 mm^3
+    asm_xb = write_xb(make_assembly_two_parts())
+    asm_model = extract_brep(parse_xb(asm_xb))
+    assert len(asm_model.assemblies) == 1
+    assert asm_model.assemblies[0].name == "TwoBlockAssembly"
+    assert len(asm_model.instances) == 2
+
+    asm_step = dumps_step(asm_model, units="mm")
+    assert "NEXT_ASSEMBLY_USAGE_OCCURRENCE" in asm_step
+    assert "ITEM_DEFINED_TRANSFORMATION" in asm_step
+    assert "TwoBlockAssembly" in asm_step
+    assert "UnitBlock" in asm_step
+    asm_stp_path = tmp_path / "assembly.step"
+    asm_stp_path.write_text(asm_step, encoding="ascii")
+    _, valid_a, vol_a, _ = _read_step_occt(asm_stp_path)
+    assert valid_a is True
+    assert vol_a == pytest.approx(2.0 * 1000.0, rel=1e-3)

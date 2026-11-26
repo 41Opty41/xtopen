@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xtopen"
-version = "0.2.0"
-description = "Clean-room Parasolid XT (.x_b, .x_t, .x_p, .x_d) reader, inspector, and native STEP AP214/AP242 converter"
+version = "0.3.0"
+description = "Clean-room Parasolid XT (.x_b, .x_t, .x_p, .x_d) reader, writer, inspector, and native STEP AP214/AP242 converter with assemblies and colors"
 readme = "README.md"
+authors = [{ name = "41Opty41" }]
 requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["cad", "parasolid", "xt", "xb", "step", "brep", "nurbs", "freecad"]
@@ -34,6 +35,8 @@ xtopen = "xtopen.cli:main"
 Homepage = "https://github.com/41Opty41/xtopen"
 Repository = "https://github.com/41Opty41/xtopen"
 Issues = "https://github.com/41Opty41/xtopen/issues"
+Documentation = "https://github.com/41Opty41/xtopen/blob/main/docs/FORMAT.md"
+"Web Viewer" = "https://41opty41.github.io/solidcraft-parasolid/"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -660,6 +660,140 @@ def make_ellipse_and_intersection_sheets() -> ParseResult:
     return b.build_solid(body_idx=body_idx, shell_idx=shell_idx, region_idx=region_idx, body_type=2)
 
 
+def _attach_attr(
+    nodes: list[XtNode],
+    alloc_fn,
+    owner_idx: int,
+    attr_name: str,
+    val_type: int,
+    val_field: str,
+    val_data: list[Any],
+    field_type_code: int,
+) -> int:
+    schema = builtin_schema()
+
+    def _mk(ntype: int, **vals: Any) -> int:
+        idx = alloc_fn()
+        varlen = vals.pop("_varlen", None)
+        sn = schema[ntype]
+        fields: list[tuple[str, Any]] = []
+        for f in effective(sn):
+            fn = f["name"]
+            if fn in vals:
+                v = vals[fn]
+                if f["code"] == "c" and isinstance(v, str):
+                    v = [ord(ch) for ch in v]
+                elif not isinstance(v, list):
+                    v = [v]
+            else:
+                if fn == "node_id":
+                    v = [idx]
+                elif f["elements"] == 1:
+                    v = []
+                elif f["elements"] > 1:
+                    v = [0] * f["elements"]
+                elif f["code"] == "p":
+                    v = [None]
+                elif f["code"] in ("u", "n", "w", "d", "t"):
+                    v = [0]
+                elif f["code"] == "f":
+                    v = [0.0]
+                elif f["code"] == "l":
+                    v = [False]
+                elif f["code"] == "c":
+                    v = [ord("+")]
+                else:
+                    v = [0]
+            fields.append((fn, v))
+        nodes.append(XtNode(type=ntype, name=sn["name"], index=idx, fields=fields, varlen=varlen))
+        return idx
+
+    name_bytes = [ord(c) for c in attr_name]
+    id_idx = _mk(79, string=name_bytes, _varlen=len(name_bytes))
+    def_idx = _mk(
+        80,
+        identifier=id_idx,
+        type_id=1001,
+        legal_owners=[True] * 14,
+        fields=[field_type_code],
+        _varlen=1,
+    )
+    val_idx = _mk(val_type, **{val_field: val_data, "_varlen": len(val_data)})
+    return _mk(81, definition=def_idx, owner=owner_idx, fields=[val_idx], _varlen=1)
+
+
+def make_colored_box() -> ParseResult:
+    """Build a 20x30x40 mm (0.02x0.03x0.04 m) box with SDL/TYSA_NAME and SDL/TYSA_COLOUR."""
+    base = make_box(0.02, 0.03, 0.04)
+    nodes = list(base.nodes)
+    nxt = [max(n.index for n in nodes) + 1]
+
+    def alloc() -> int:
+        v = nxt[0]
+        nxt[0] += 1
+        return v
+
+    body_idx = next(n.index for n in nodes if n.type == 12)
+    face_idx = next(n.index for n in nodes if n.type == 14)
+
+    _attach_attr(nodes, alloc, body_idx, "SDL/TYSA_NAME", 84, "values", [ord(c) for c in "RedBlock"], 1)
+    _attach_attr(nodes, alloc, body_idx, "SDL/TYSA_COLOUR", 83, "values", [0.85, 0.15, 0.15], 2)
+    _attach_attr(nodes, alloc, face_idx, "SDL/TYSA_COLOUR", 83, "values", [0.1, 0.4, 0.9], 2)
+
+    nodes.sort(key=lambda n: n.index)
+    return ParseResult(header=base.header, nodes=nodes, remaining_bytes=0)
+
+
+def make_assembly_two_parts() -> ParseResult:
+    """Build an ASSEMBLY(10) with two INSTANCE(11) placements of a 10x10x10 mm box."""
+    base = make_box(0.01, 0.01, 0.01)
+    b = _XtBrepBuilder()
+    b._nodes = list(base.nodes)
+    b._next_idx = max(n.index for n in b._nodes) + 1
+    nodes = b._nodes
+
+    def alloc() -> int:
+        return b.alloc()
+
+    body_idx = next(n.index for n in nodes if n.type == 12)
+    asm_idx = b.alloc()
+    inst1_idx = b.alloc()
+    inst2_idx = b.alloc()
+
+    # Transform 1: identity at (0, 0, 0)
+    tf1_idx = b.add(
+        100,
+        owner=inst1_idx,
+        rotation_matrix=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        translation_vector=[0.0, 0.0, 0.0],
+        scale=1.0,
+        flag=1,
+        perspective_vector=[0.0, 0.0, 0.0],
+    )
+    # Transform 2: rotate 90 deg about Z, translate +0.05 m along X (50 mm)
+    tf2_idx = b.add(
+        100,
+        owner=inst2_idx,
+        rotation_matrix=[0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        translation_vector=[0.05, 0.0, 0.0],
+        scale=1.0,
+        flag=1,
+        perspective_vector=[0.0, 0.0, 0.0],
+    )
+
+    b.add(11, idx=inst1_idx, type=1, part=body_idx, transform=tf1_idx, assembly=asm_idx, next_in_part=inst2_idx)
+    b.add(11, idx=inst2_idx, type=1, part=body_idx, transform=tf2_idx, assembly=asm_idx, prev_in_part=inst1_idx)
+    b.add(10, idx=asm_idx, highest_node_id=b._next_idx + 10, state=1, type=1, sub_instance=inst1_idx)
+
+    _attach_attr(nodes, alloc, asm_idx, "SDL/TYSA_NAME", 84, "values", [ord(c) for c in "TwoBlockAssembly"], 1)
+    _attach_attr(nodes, alloc, body_idx, "SDL/TYSA_NAME", 84, "values", [ord(c) for c in "UnitBlock"], 1)
+    _attach_attr(nodes, alloc, inst1_idx, "SDL/TYSA_NAME", 84, "values", [ord(c) for c in "Block_A"], 1)
+    _attach_attr(nodes, alloc, inst2_idx, "SDL/TYSA_NAME", 84, "values", [ord(c) for c in "Block_B"], 1)
+
+    nodes.sort(key=lambda n: n.index)
+    return ParseResult(header=base.header, nodes=nodes, remaining_bytes=0)
+
+
 @pytest.fixture
 def box_model() -> ParseResult:
     return make_box(1.0, 2.0, 3.0)

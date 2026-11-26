@@ -38,13 +38,16 @@ flowchart LR
 - **Zero runtime dependencies** — pure Python 3.10+ standard library (`cadquery-ocp` is strictly optional).
 - **Self-contained XT schema** — built-in schema from public XT documentation; no external `.s_t` files needed.
 - **Full container support** — Form-1 & Form-2 binary `.x_b`, text `.x_t`, partition `.x_p`, and delta `PMARK` streams `.x_d`.
-- **Native STEP AP214 / AP242 export** — planes, cylinders, cones, spheres, tori, extruded/revolved/offset surfaces, rational & non-rational NURBS, circles, ellipses, intersection sample curves, 2D p-curve 3D lifting, and multi-body shells (`--units mm|m`).
-- **Roundtrip & CAD integrations** — `write_xb`, `write_xt`, `xb_to_xt`, `xt_to_xb`, optional [`xtopen.occt_bridge`](src/xtopen/occt_bridge.py), and [`freecad/ImportParasolid.FCMacro`](freecad/ImportParasolid.FCMacro).
+- **Native STEP AP214 / AP242 export** — planes, cylinders, cones, spheres, tori, extruded/revolved/offset surfaces, rational & non-rational NURBS, circles, ellipses, intersection sample curves, 2D p-curve 3D lifting, multi-body shells, **assembly hierarchies (`ASSEMBLY` / `INSTANCE` / `TRANSFORM`)**, and **face/body colors, names & transparency (`SDL/TYSA_*`)** (`--units mm|m`).
+- **Roundtrip & CAD integrations** — `write_xb`, `write_xt`, `xb_to_xt`, `xt_to_xb`, optional [`xtopen.occt_bridge`](src/xtopen/occt_bridge.py), [`freecad/ImportParasolid.FCMacro`](freecad/ImportParasolid.FCMacro), companion Rust [SolidCraft plugins & live browser WASM viewer](https://41opty41.github.io/solidcraft-parasolid/).
 
 ## Quick Start
 
 ```bash
-pip install -e .
+pip install xtopen
+# or for optional OpenCASCADE checks:
+pip install "xtopen[occt]"
+
 xtopen convert model.x_b model.step --units mm --schema AP214
 xtopen info model.x_b
 ```
@@ -90,7 +93,7 @@ pip install -e ".[occt]"
 
 - **XT Binary Schema Parity**: Verified `4,251 / 4,251` `.x_b` files (`0` errors, `0` field mismatches) using only the built-in schema, plus `.x_p` and `.x_d` partition/delta containers.
 - **STEP Export Validation (OCCT)**: Verified `304 / 304` stratified corpus `.x_b` conversions load cleanly in OpenCASCADE `STEPControl_Reader` (`0` Part-21 syntax errors, `303 / 304 = 99.7%` `BRepCheck_Analyzer.IsValid()`).
-- **Known Limitations**: Procedural rolling-ball fillets (`BLENDED_EDGE 56`) have no exact analytic STEP representation and fall back to placeholder planes; pure `INSTANCE`/`TRANSFORM` assemblies are extracted into `BrepModel.instances` without STEP assembly hierarchy expansion yet.
+- **Known Limitations**: Procedural rolling-ball fillets (`BLENDED_EDGE 56`) have no exact analytic STEP representation and fall back to placeholder planes.
 
 ## Support
 

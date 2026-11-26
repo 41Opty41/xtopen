@@ -130,6 +130,8 @@ def summarize(source: ParseResult | BrepModel) -> dict[str, Any]:
         "bodies": model.bodies,
         "counts": {
             "nodes": len(parsed.nodes) if parsed is not None else None,
+            "assemblies": len(model.assemblies),
+            "instances": len(model.instances),
             "faces": len(model.faces),
             "edges": len(model.edges),
             "vertices": len(model.vertices),

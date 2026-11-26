@@ -111,6 +111,77 @@ class Attribute:
 
 
 @dataclass
+class Appearance:
+    """Decoded standard Parasolid SDL/TYSA appearance & metadata attributes."""
+
+    color_rgb: tuple[float, float, float] | None = None
+    transparency: float | None = None
+    name: str | None = None
+    layer: int | None = None
+    density: float | None = None
+
+    def apply_attribute(self, attr: Attribute) -> None:
+        upper = attr.name.upper()
+        if upper.endswith("TYSA_COLOUR") or upper.endswith("TYSA_COLOR"):
+            reals: list[float] = []
+            for v in attr.values:
+                if isinstance(v, (list, tuple)):
+                    for item in v:
+                        if isinstance(item, (int, float)):
+                            reals.append(float(item))
+            if len(reals) >= 3:
+                self.color_rgb = (
+                    max(0.0, min(1.0, reals[0])),
+                    max(0.0, min(1.0, reals[1])),
+                    max(0.0, min(1.0, reals[2])),
+                )
+        elif upper.endswith("TYSA_NAME"):
+            for v in attr.values:
+                if isinstance(v, str) and v.strip():
+                    self.name = v.strip()
+                    break
+        elif upper.endswith("TYSA_TRANSPARENCY") or upper.endswith("TYSA_TRANSLUCENCY"):
+            for v in attr.values:
+                if isinstance(v, (list, tuple)) and v and isinstance(v[0], (int, float)):
+                    val = float(v[0])
+                    if math.isfinite(val):
+                        self.transparency = max(0.0, min(1.0, val))
+                        break
+        elif upper.endswith("TYSA_DENSITY"):
+            for v in attr.values:
+                if isinstance(v, (list, tuple)) and v and isinstance(v[0], (int, float)):
+                    val = float(v[0])
+                    if math.isfinite(val) and val > 0.0:
+                        self.density = val
+                        break
+        elif upper.endswith("TYSA_LAYER"):
+            for v in attr.values:
+                if isinstance(v, (list, tuple)) and v and isinstance(v[0], int):
+                    self.layer = int(v[0])
+                    break
+
+    def inherit_from(self, parent: Appearance) -> Appearance:
+        return Appearance(
+            color_rgb=self.color_rgb if self.color_rgb is not None else parent.color_rgb,
+            transparency=self.transparency if self.transparency is not None else parent.transparency,
+            name=self.name if self.name is not None else parent.name,
+            layer=self.layer if self.layer is not None else parent.layer,
+            density=self.density if self.density is not None else parent.density,
+        )
+
+
+@dataclass
+class AssemblyInfo:
+    """Topological assembly node grouping sub-assembly / body instances."""
+
+    index: int
+    node_id: int
+    name: str | None = None
+    appearance: Appearance = field(default_factory=Appearance)
+    instance_indices: list[int] = field(default_factory=list)
+
+
+@dataclass
 class Vertex:
     """Topological vertex with 3D coordinates."""
 
@@ -168,6 +239,7 @@ class Face:
     loops: list[Loop] = field(default_factory=list)
     tolerance: float = 0.0
     attributes: list[Attribute] = field(default_factory=list)
+    appearance: Appearance = field(default_factory=Appearance)
 
 
 @dataclass
@@ -183,6 +255,7 @@ class BrepModel:
     curves: dict[int, dict[str, Any]]
     attributes: list[Attribute] = field(default_factory=list)
     instances: list[dict[str, Any]] = field(default_factory=list)
+    assemblies: list[AssemblyInfo] = field(default_factory=list)
 
     def bbox(self) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
         """Compute axis-aligned bounding box from vertex points (or NURBS surface poles)."""
@@ -211,6 +284,8 @@ class BrepModel:
             "bodies": list(self.bodies),
             "counts": {
                 "bodies": len(self.bodies),
+                "assemblies": len(self.assemblies),
+                "instances": len(self.instances),
                 "faces": len(self.faces),
                 "edges": len(self.edges),
                 "vertices": len(self.vertices),
@@ -220,6 +295,8 @@ class BrepModel:
             },
             "bbox": self.bbox(),
             "euler": self.euler_characteristic(),
+            "assemblies": [asdict(a) for a in self.assemblies],
+            "instances": list(self.instances),
             "faces": [asdict(f) for f in self.faces.values()],
             "edges": [asdict(e) for e in self.edges.values()],
             "vertices": [asdict(v) for v in self.vertices.values()],
@@ -593,9 +670,23 @@ def _extract_curve(
     return out
 
 
-def _extract_attributes(nodes: dict[int, XtNode]) -> tuple[list[Attribute], dict[int, list[Attribute]]]:
+def _extract_attributes(
+    nodes: dict[int, XtNode],
+) -> tuple[list[Attribute], dict[int, list[Attribute]], dict[int, Appearance]]:
+    owner_from_chain: dict[int, int] = {}
+    for n in nodes.values():
+        if n.type not in (10, 11, 12, 13, 14, 15, 16, 18, 29):
+            continue
+        cur = n.get("attributes_groups")
+        seen: set[int] = set()
+        while cur and cur in nodes and cur not in seen:
+            seen.add(cur)
+            owner_from_chain.setdefault(cur, n.index)
+            cur = nodes[cur].get("next")
+
     all_attrs: list[Attribute] = []
     by_owner: dict[int, list[Attribute]] = {}
+    app_by_owner: dict[int, Appearance] = {}
     for n in nodes.values():
         if n.type != 81:  # ATTRIBUTE
             continue
@@ -605,7 +696,11 @@ def _extract_attributes(nodes: dict[int, XtNode]) -> tuple[list[Attribute], dict
             id_idx = nodes[d_idx].get("identifier")
             if id_idx in nodes:
                 raw_chars = nodes[id_idx].get_list("string")
-                def_name = bytes(int(x) & 0xFF for x in raw_chars).decode("ascii", "replace")
+                def_name = (
+                    bytes(int(x) & 0xFF for x in raw_chars)
+                    .split(b"\x00", 1)[0]
+                    .decode("ascii", "replace")
+                )
         vals: list[Any] = []
         for f_idx in n.get_list("fields"):
             vn = nodes.get(f_idx)
@@ -613,24 +708,35 @@ def _extract_attributes(nodes: dict[int, XtNode]) -> tuple[list[Attribute], dict
                 continue
             if vn.type in (84, 102):  # CHAR_VALUES / KEY
                 raw_chars = vn.get_list("values") if vn.type == 84 else vn.get_list("string")
-                vals.append(bytes(int(x) & 0xFF for x in raw_chars).decode("utf-8", "replace"))
+                vals.append(
+                    bytes(int(x) & 0xFF for x in raw_chars)
+                    .split(b"\x00", 1)[0]
+                    .decode("utf-8", "replace")
+                )
             elif vn.type == 98:  # UNICODE_VALUES
                 raw_u = vn.get_list("values")
-                vals.append("".join(chr(int(x) & 0xFFFF) for x in raw_u))
+                chars = []
+                for u in raw_u:
+                    code = int(u) & 0xFFFF
+                    if code == 0:
+                        break
+                    chars.append(chr(code))
+                vals.append("".join(chars))
             else:
                 vals.append(vn.get_list("values"))
-        owner_idx = n.get("owner")
+        owner_idx = n.get("owner") or owner_from_chain.get(n.index)
         attr = Attribute(index=n.index, name=def_name, owner_index=owner_idx, values=vals)
         all_attrs.append(attr)
         if owner_idx is not None:
             by_owner.setdefault(owner_idx, []).append(attr)
-    return all_attrs, by_owner
+            app_by_owner.setdefault(owner_idx, Appearance()).apply_attribute(attr)
+    return all_attrs, by_owner, app_by_owner
 
 
 def extract_brep(source: ParseResult | list[XtNode] | dict[int, XtNode]) -> BrepModel:
     """Extract a high-level B-rep topological and geometric model from XT nodes."""
     header, nodes = _node_map(source)
-    all_attrs, attrs_by_owner = _extract_attributes(nodes)
+    all_attrs, attrs_by_owner, app_by_owner = _extract_attributes(nodes)
 
     vertices: dict[int, Vertex] = {}
     for n in nodes.values():
@@ -729,6 +835,7 @@ def extract_brep(source: ParseResult | list[XtNode] | dict[int, XtNode]) -> Brep
             loops=loops,
             tolerance=float(n.get("tolerance") or 0.0),
             attributes=attrs_by_owner.get(n.index, []),
+            appearance=app_by_owner.get(n.index, Appearance()),
         )
 
     bodies: list[dict[str, Any]] = []
@@ -743,6 +850,7 @@ def extract_brep(source: ParseResult | list[XtNode] | dict[int, XtNode]) -> Brep
             shell_indices.append(sh)
             sh = nodes[sh].get("next")
         body_faces = [f.index for f in faces.values() if f.shell_index in seen_s]
+        b_app = app_by_owner.get(n.index, Appearance())
         bodies.append(
             {
                 "index": n.index,
@@ -750,10 +858,13 @@ def extract_brep(source: ParseResult | list[XtNode] | dict[int, XtNode]) -> Brep
                 "body_type": n.get("body_type"),
                 "shell_indices": shell_indices,
                 "face_count": len(body_faces),
+                "name": b_app.name,
+                "appearance": b_app,
             }
         )
 
     instances: list[dict[str, Any]] = []
+    inst_by_asm: dict[int, list[int]] = {}
     for n in nodes.values():
         if n.type != 11:  # INSTANCE
             continue
@@ -762,20 +873,55 @@ def extract_brep(source: ParseResult | list[XtNode] | dict[int, XtNode]) -> Brep
         if tf_idx and tf_idx in nodes:
             tn = nodes[tf_idx]
             rot = [_safe_float(x, 0.0) for x in tn.get_list("rotation_matrix")]
+            sc = _safe_float(tn.get("scale"), 1.0)
+            if abs(sc) < 1e-15:
+                sc = 1.0
             tf_dict = {
                 "rotation_matrix": rot,
                 "translation": _safe_vec3(tn.get("translation_vector"), (0.0, 0.0, 0.0)),
-                "scale": _safe_float(tn.get("scale"), 1.0),
+                "scale": sc,
             }
+        asm_idx = n.get("assembly")
+        if asm_idx:
+            inst_by_asm.setdefault(asm_idx, []).append(n.index)
+        i_app = app_by_owner.get(n.index, Appearance())
         instances.append(
             {
                 "index": n.index,
                 "node_id": int(n.get("node_id") or 0),
                 "type": n.get("type"),
                 "part": n.get("part"),
-                "assembly": n.get("assembly"),
+                "assembly": asm_idx,
                 "transform": tf_dict,
+                "name": i_app.name,
+                "appearance": i_app,
             }
+        )
+
+    assemblies: list[AssemblyInfo] = []
+    for n in nodes.values():
+        if n.type != 10:  # ASSEMBLY
+            continue
+        inst_ids: list[int] = []
+        seen_i: set[int] = set()
+        cur_i = n.get("sub_instance")
+        while cur_i and cur_i in nodes and cur_i not in seen_i and nodes[cur_i].type == 11:
+            seen_i.add(cur_i)
+            inst_ids.append(cur_i)
+            cur_i = nodes[cur_i].get("next_in_part")
+        for extra_i in inst_by_asm.get(n.index, ()):
+            if extra_i not in seen_i:
+                seen_i.add(extra_i)
+                inst_ids.append(extra_i)
+        a_app = app_by_owner.get(n.index, Appearance())
+        assemblies.append(
+            AssemblyInfo(
+                index=n.index,
+                node_id=int(n.get("node_id") or 0),
+                name=a_app.name,
+                appearance=a_app,
+                instance_indices=inst_ids,
+            )
         )
 
     return BrepModel(
@@ -788,4 +934,5 @@ def extract_brep(source: ParseResult | list[XtNode] | dict[int, XtNode]) -> Brep
         curves=curves,
         attributes=all_attrs,
         instances=instances,
+        assemblies=assemblies,
     )
