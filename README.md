@@ -6,7 +6,7 @@
   <img alt="xtopen logo" src="assets/logo-light.svg" width="380">
 </picture>
 
-**Clean-room Parasolid XT (`.x_b`, `.x_t`, `.x_p`, `.x_d`) reader, writer, B-rep inspector & native STEP AP214/AP242 exporter.**
+**Clean-room Parasolid XT (`.x_b`, `.x_t`, `.x_p`, `.x_d`) and Siemens NX (`.prt`) reader, writer, B-rep inspector & native STEP AP214/AP242 exporter.**
 
 **English** · [Русский](docs/i18n/README.ru.md) · [中文](docs/i18n/README.zh-CN.md) · [Deutsch](docs/i18n/README.de.md) · [日本語](docs/i18n/README.ja.md) · [Español](docs/i18n/README.es.md)
 
@@ -37,7 +37,7 @@ flowchart LR
 
 - **Zero runtime dependencies** — pure Python 3.10+ standard library (`cadquery-ocp` is strictly optional).
 - **Self-contained XT schema** — built-in schema from public XT documentation; no external `.s_t` files needed.
-- **Full container support** — Form-1 & Form-2 binary `.x_b`, text `.x_t`, partition `.x_p`, and delta `PMARK` streams `.x_d`.
+- **Full container support** — Form-1 & Form-2 binary `.x_b`, text `.x_t`, partition `.x_p`, delta `PMARK` streams `.x_d`, plus **Siemens NX `.prt`** (`SPLMSSTR` & legacy `OLE2/CFB`) embedded Parasolid B-rep extraction.
 - **Native STEP AP214 / AP242 export** — planes, cylinders, cones, spheres, tori, extruded/revolved/offset surfaces, rational & non-rational NURBS, circles, ellipses, intersection sample curves, 2D p-curve 3D lifting, multi-body shells, **assembly hierarchies (`ASSEMBLY` / `INSTANCE` / `TRANSFORM`)**, and **face/body colors, names & transparency (`SDL/TYSA_*`)** (`--units mm|m`).
 - **Roundtrip & CAD integrations** — `write_xb`, `write_xt`, `xb_to_xt`, `xt_to_xb`, optional [`xtopen.occt_bridge`](src/xtopen/occt_bridge.py), [`freecad/ImportParasolid.FCMacro`](freecad/ImportParasolid.FCMacro), companion Rust [SolidCraft plugins & live browser WASM viewer](https://41opty41.github.io/solidcraft-parasolid/).
 
@@ -73,7 +73,8 @@ pip install -e ".[occt]"
 | `xtopen info <file> [--json]` | Show container header, node histogram, topology counts, bounding box, and Euler characteristic |
 | `xtopen validate <file> [--json]` | Validate stream completeness, loop vertex closure, edge pairing, and curve/surface bounds |
 | `xtopen dump <file> [--nodes-only] [-o out.json]` | Export structured B-rep model or raw XT records to JSON |
-| `xtopen convert <in> <out> [--units mm\|m] [--schema AP214\|AP242]` | Convert between `.x_b`, `.x_t`, and `.step`/`.stp` |
+| `xtopen convert <in> <out> [--units mm\|m] [--schema AP214\|AP242]` | Convert between `.prt`, `.x_b`, `.x_t`, and `.step`/`.stp` |
+| `xtopen extract-prt <file.prt> <out_dir>` | Extract embedded `.x_b` streams (and preview thumbnail) from an NX `.prt` file |
 
 ## Supported XT Entities
 

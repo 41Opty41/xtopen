@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xtopen"
-version = "0.3.0"
-description = "Clean-room Parasolid XT (.x_b, .x_t, .x_p, .x_d) reader, writer, inspector, and native STEP AP214/AP242 converter with assemblies and colors"
+version = "0.4.0"
+description = "Clean-room Parasolid XT (.x_b, .x_t, .x_p, .x_d) and Siemens NX (.prt) reader, writer, inspector, and native STEP AP214/AP242 converter"
 readme = "README.md"
 authors = [{ name = "41Opty41" }]
 requires-python = ">=3.10"
 license = { text = "MIT" }
-keywords = ["cad", "parasolid", "xt", "xb", "step", "brep", "nurbs", "freecad"]
+keywords = ["cad", "parasolid", "xt", "xb", "nx", "prt", "step", "brep", "nurbs", "freecad"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.0] - 2026-11-27
+
+- Added clean-room **Siemens NX `.prt`** extraction (`SPLMSSTR` & legacy `OLE2/CFB` containers) via `extract_prt`, `parse_prt`, `load_prt`, `extract_prt_brep`, `merge_brep_models`, and `is_prt`.
+- Updated `xtopen info|validate|dump|convert` CLI to auto-detect `.prt` files and added `xtopen extract-prt <file.prt> <out_dir>`.
+
 ## [0.2.0] - 2026-11-24
 
 - Added multi-body / multi-shell STEP AP214 & AP242 export (`CLOSED_SHELL` / `OPEN_SHELL` grouping).
